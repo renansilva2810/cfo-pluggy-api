@@ -14,6 +14,9 @@ if not PLUGGY_CLIENT_ID or not PLUGGY_CLIENT_SECRET:
 PLUGGY_BASE_URL = "https://api.pluggy.ai"
 
 app = FastAPI(title="CFO Backend - Pluggy API")
+@app.get("/")
+def root():
+    return {"message": "API CFO Pluggy rodando"}
 
 
 class ConnectTokenRequest(BaseModel):
