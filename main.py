@@ -1,175 +1,244 @@
 import os
-from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Any
 
 import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-PLUGGY_CLIENT_ID = os.getenv("PLUGGY_CLIENT_ID")
-PLUGGY_CLIENT_SECRET = os.getenv("PLUGGY_CLIENT_SECRET")
-
-if not PLUGGY_CLIENT_ID or not PLUGGY_CLIENT_SECRET:
-    raise RuntimeError("Configure PLUGGY_CLIENT_ID e PLUGGY_CLIENT_SECRET nas variáveis de ambiente.")
+# -----------------------------
+# Config Pluggy
+# -----------------------------
 
 PLUGGY_BASE_URL = "https://api.pluggy.ai"
 
-app = FastAPI(title="CFO Backend - Pluggy API")
-@app.get("/")
-def root():
-    return {"message": "API CFO Pluggy rodando"}
+# Esses 3 valores vêm das variáveis do Railway
+PLUGGY_CLIENT_ID = os.getenv("PLUGGY_CLIENT_ID")
+PLUGGY_CLIENT_SECRET = os.getenv("PLUGGY_CLIENT_SECRET")
+PLUGGY_API_KEY = os.getenv("PLUGGY_API_KEY")  # API KEY da Pluggy (Dashboard)
 
 
-class ConnectTokenRequest(BaseModel):
-    user_id: str  # ex: "renan"
-
-
-def get_pluggy_api_key() -> str:
+def get_pluggy_headers() -> Dict[str, str]:
     """
-    Pede um API Key pra Pluggy usando CLIENT_ID e CLIENT_SECRET.
-    Documentação: POST /auth
+    Headers padrão para chamar a API de dados da Pluggy
+    (accounts, transactions, items...).
     """
-    url = f"{PLUGGY_BASE_URL}/auth"
-    resp = requests.post(
-        url,
-        json={
-            "clientId": PLUGGY_CLIENT_ID,
-            "clientSecret": PLUGGY_CLIENT_SECRET,
-        },
-        timeout=15,
-    )
-    if not resp.ok:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Erro ao autenticar na Pluggy: {resp.status_code} {resp.text}",
-        )
-    data = resp.json()
-    api_key = data.get("apiKey")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="Resposta de auth da Pluggy sem apiKey.")
-    return api_key
+    if not PLUGGY_API_KEY:
+        raise RuntimeError("PLUGGY_API_KEY não configurada nas variáveis de ambiente")
 
-def pluggy_headers(api_key: str) -> dict:
     return {
-        "X-API-KEY": api_key,
+        "X-API-KEY": PLUGGY_API_KEY,
         "Content-Type": "application/json",
-        "Accept": "application/json",
     }
+
+
+# -----------------------------
+# FastAPI App
+# -----------------------------
+
+app = FastAPI(title="CFO Pluggy API", version="1.0.0")
 
 
 @app.get("/health")
-def health_check():
+def health():
     return {"status": "ok"}
 
 
-@app.post("/pluggy/connect-token")
-def create_connect_token(body: ConnectTokenRequest):
+# -----------------------------
+# Models
+# -----------------------------
+
+class ConnectTokenRequest(BaseModel):
+    user_id: str
+
+
+class ConnectTokenResponse(BaseModel):
+    connectToken: str
+    raw: Dict[str, Any]
+
+
+# -----------------------------
+# Helpers Pluggy
+# -----------------------------
+
+def create_connect_token(user_id: str) -> Dict[str, Any]:
     """
-    Gera um connectToken pra usar no Pluggy Connect Widget.
-    Doc: POST /connect_token
+    Chama a Pluggy para criar um Connect Token
+    que será usado no widget de conexão do banco.
     """
-    api_key = get_pluggy_api_key()
+    if not PLUGGY_CLIENT_ID or not PLUGGY_CLIENT_SECRET:
+        raise RuntimeError("PLUGGY_CLIENT_ID ou PLUGGY_CLIENT_SECRET não configurados")
+
     url = f"{PLUGGY_BASE_URL}/connect_token"
 
     payload = {
-        "clientUserId": body.user_id,
-        # Você pode incluir options aqui se quiser (webhookUrl, oauthRedirectUrl, etc)
+        "clientId": PLUGGY_CLIENT_ID,
+        "clientSecret": PLUGGY_CLIENT_SECRET,
+        "userId": user_id,
     }
 
-    resp = requests.post(url, json=payload, headers=pluggy_headers(api_key), timeout=15)
-    if not resp.ok:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Erro ao criar connect token: {resp.status_code} {resp.text}",
+    resp = requests.post(url, json=payload, timeout=30)
+
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"Erro ao criar connect token: {resp.status_code} {resp.text}"
         )
 
-    data = resp.json()
-    # Nas docs o campo vem como accessToken
-    access_token = data.get("accessToken") or data.get("access_token")
-    if not access_token:
-        raise HTTPException(status_code=500, detail="Resposta da Pluggy sem accessToken.")
-
-    return {
-        "connectToken": access_token,
-        "raw": data,
-    }
+    return resp.json()
 
 
-@app.get("/users/{user_id}/snapshot")
-def get_user_snapshot(user_id: str, item_id: str):
+def fetch_accounts_by_item(item_id: str) -> List[Dict[str, Any]]:
     """
-    Dado um itemId (conexão com banco na Pluggy), busca contas e transações
-    e devolve um snapshot simplificado para o seu CFO GPT.
+    Busca TODAS as contas de um item usando apenas itemId.
     """
-    api_key = get_pluggy_api_key()
+    url = f"{PLUGGY_BASE_URL}/accounts"
+    headers = get_pluggy_headers()
 
-    # 1) Buscar contas desse item
-    accounts_url = f"{PLUGGY_BASE_URL}/accounts"
-    accounts_resp = requests.get(
-        accounts_url,
-        headers=pluggy_headers(api_key),
-        params={"itemId": item_id, "pageSize": 500},
-        timeout=20,
-    )
-    if not accounts_resp.ok:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Erro ao listar contas: {accounts_resp.status_code} {accounts_resp.text}",
-        )
-    accounts = accounts_resp.json().get("results", [])
-
-    # 2) Buscar transações dos últimos 90 dias
-    end_date = datetime.now(timezone.utc)
-    start_date = end_date - timedelta(days=90)
-
-    transactions_url = f"{PLUGGY_BASE_URL}/transactions"
-    tx_resp = requests.get(
-        transactions_url,
-        headers=pluggy_headers(api_key),
-        params={
-            "itemId": item_id,
-            "from": start_date.isoformat(),
-            "to": end_date.isoformat(),
-            "pageSize": 500,
-        },
-        timeout=20,
-    )
-    if not tx_resp.ok:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Erro ao listar transações: {tx_resp.status_code} {tx_resp.text}",
-        )
-    transactions = tx_resp.json().get("results", [])
-
-    # 3) Cálculos básicos de snapshot
-    saldo_total = 0.0
-    for acc in accounts:
-        bal = acc.get("balance")
-        if isinstance(bal, (int, float)):
-            saldo_total += bal
-
-    entradas = [t for t in transactions if t.get("amount", 0) > 0]
-    saidas = [t for t in transactions if t.get("amount", 0) < 0]
-
-    total_entradas = sum(t.get("amount", 0) for t in entradas)
-    total_saidas = sum(t.get("amount", 0) for t in saidas)
-
-    snapshot = {
-        "user_id": user_id,
-        "item_id": item_id,
-        "saldo_total_contas": saldo_total,
-        "fluxo_90_dias": {
-            "total_entradas": total_entradas,
-            "total_saidas": total_saidas,
-            "saldo": total_entradas + total_saidas,
-        },
-        "resumo": {
-            "qtd_contas": len(accounts),
-            "qtd_transacoes": len(transactions),
-        },
-        "raw": {
-            "accounts": accounts,
-            "transactions": transactions,
-        },
+    params = {
+        "itemId": item_id,
+        "pageSize": 100,
     }
 
-    return snapshot
+    all_accounts: List[Dict[str, Any]] = []
+    cursor = None
+
+    while True:
+        if cursor:
+            params["cursor"] = cursor
+
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"Erro ao listar contas: {resp.status_code} {resp.text}"
+            )
+
+        data = resp.json()
+        all_accounts.extend(data.get("results", []))
+
+        cursor = data.get("nextCursor")
+        if not cursor:
+            break
+
+    return all_accounts
+
+
+def fetch_transactions_by_item(item_id: str) -> List[Dict[str, Any]]:
+    """
+    Busca TODAS as transações de um item usando apenas itemId.
+    Isso evita o erro 'accountid should not be null or undefined'.
+    """
+    url = f"{PLUGGY_BASE_URL}/transactions"
+    headers = get_pluggy_headers()
+
+    params = {
+        "itemId": item_id,
+        "pageSize": 500,
+    }
+
+    all_txs: List[Dict[str, Any]] = []
+    cursor = None
+
+    while True:
+        if cursor:
+            params["cursor"] = cursor
+
+        resp = requests.get(url, headers=headers, params=params, timeout=60)
+
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"Erro ao listar transações: {resp.status_code} {resp.text}"
+            )
+
+        data = resp.json()
+        all_txs.extend(data.get("results", []))
+
+        cursor = data.get("nextCursor")
+        if not cursor:
+            break
+
+    return all_txs
+
+
+# -----------------------------
+# Endpoints
+# -----------------------------
+
+@app.post(
+    "/pluggy/connect-token",
+    response_model=ConnectTokenResponse,
+    summary="Cria um connectToken da Pluggy para abrir o widget",
+)
+def api_create_connect_token(body: ConnectTokenRequest):
+    try:
+        data = create_connect_token(body.user_id)
+        # A resposta padrão da Pluggy costuma ter 'accessToken',
+        # aqui empacotamos num formato mais amigável pro front.
+        return {
+            "connectToken": data.get("accessToken") or data.get("connectToken"),
+            "raw": data,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/users/{user_id}/snapshot",
+    summary="Snapshot financeiro do usuário para 1 item (banco) na Pluggy",
+)
+def get_snapshot(user_id: str, item_id: str):
+    """
+    Monta um snapshot simples a partir das contas + transações do item.
+    - item_id vem da Pluggy (ex: 438973f7-4d7d-4d21-8a1c-958e1482cf82)
+    """
+    try:
+        # 1) Contas
+        accounts = fetch_accounts_by_item(item_id)
+
+        # saldo total das contas (campo 'balance' se existir)
+        saldo_total = 0.0
+        for acc in accounts:
+            # Pluggy costuma usar 'balance' em 'balance' ou 'balance.current'
+            balance = acc.get("balance") or {}
+            if isinstance(balance, dict):
+                valor = balance.get("current") or balance.get("available") or 0
+            else:
+                valor = balance or 0
+            saldo_total += float(valor)
+
+        # 2) Transações
+        transactions = fetch_transactions_by_item(item_id)
+
+        total_entradas = 0.0
+        total_saidas = 0.0
+
+        for tx in transactions:
+            amount = float(tx.get("amount") or 0)
+            if amount > 0:
+                total_entradas += amount
+            elif amount < 0:
+                total_saidas += amount
+
+        snapshot = {
+            "user_id": user_id,
+            "item_id": item_id,
+            "saldo_total_contas": saldo_total,
+            "fluxo_geral": {
+                "total_entradas": total_entradas,
+                "total_saidas": total_saidas,
+                "saldo_movimento": total_entradas + total_saidas,
+            },
+            "resumo": {
+                "qtd_contas": len(accounts),
+                "qtd_transacoes": len(transactions),
+            },
+            # se quiser, pode esconder o raw depois. por enquanto deixo exposto pra debug
+            "raw": {
+                "accounts": accounts,
+                "transactions": transactions,
+            },
+        }
+
+        return snapshot
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
