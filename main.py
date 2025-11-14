@@ -48,11 +48,11 @@ def get_pluggy_api_key() -> str:
         raise HTTPException(status_code=500, detail="Resposta de auth da Pluggy sem apiKey.")
     return api_key
 
-
 def pluggy_headers(api_key: str) -> dict:
     return {
-        "Authorization": f"Bearer {api_key}",
+        "X-API-KEY": api_key,
         "Content-Type": "application/json",
+        "Accept": "application/json",
     }
 
 
