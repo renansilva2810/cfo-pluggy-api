@@ -11,7 +11,7 @@ PLUGGY_CLIENT_SECRET = os.getenv("PLUGGY_CLIENT_SECRET")
 if not PLUGGY_CLIENT_ID or not PLUGGY_CLIENT_SECRET:
     raise RuntimeError("Configure PLUGGY_CLIENT_ID e PLUGGY_CLIENT_SECRET nas variáveis de ambiente.")
 
-PLUGGY_BASE_URL = "https://api.pluggy.ai"
+PLUGGY_BASE_URL = "https://api.pluggy.ai/dev"
 
 app = FastAPI(title="CFO Backend - Pluggy API")
 @app.get("/")
