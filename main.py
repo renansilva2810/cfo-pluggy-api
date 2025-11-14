@@ -11,22 +11,46 @@ from pydantic import BaseModel
 
 PLUGGY_BASE_URL = "https://api.pluggy.ai"
 
-# Esses 3 valores vêm das variáveis do Railway
+# Esses 2 valores vêm das variáveis do Railway
 PLUGGY_CLIENT_ID = os.getenv("PLUGGY_CLIENT_ID")
 PLUGGY_CLIENT_SECRET = os.getenv("PLUGGY_CLIENT_SECRET")
-PLUGGY_API_KEY = os.getenv("PLUGGY_API_KEY")  # API KEY da Pluggy (Dashboard)
+
+
+def get_pluggy_access_token() -> str:
+    """
+    Autentica na Pluggy usando clientId + clientSecret e devolve um accessToken.
+    Esse token é usado como Bearer nas chamadas de /accounts e /transactions.
+    """
+    if not PLUGGY_CLIENT_ID or not PLUGGY_CLIENT_SECRET:
+        raise RuntimeError("PLUGGY_CLIENT_ID ou PLUGGY_CLIENT_SECRET não configurados")
+
+    url = f"{PLUGGY_BASE_URL}/auth"
+    payload = {
+        "clientId": PLUGGY_CLIENT_ID,
+        "clientSecret": PLUGGY_CLIENT_SECRET,
+    }
+
+    resp = requests.post(url, json=payload, timeout=30)
+
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Erro ao autenticar na Pluggy: {resp.status_code} {resp.text}")
+
+    data = resp.json()
+    token = data.get("accessToken")
+    if not token:
+        raise RuntimeError("Resposta de auth da Pluggy não trouxe accessToken")
+
+    return token
 
 
 def get_pluggy_headers() -> Dict[str, str]:
     """
-    Headers padrão para chamar a API de dados da Pluggy
-    (accounts, transactions, items...).
+    Headers padrão para chamar a API de dados da Pluggy (accounts, transactions, etc.).
+    Usa Bearer token gerado por /auth.
     """
-    if not PLUGGY_API_KEY:
-        raise RuntimeError("PLUGGY_API_KEY não configurada nas variáveis de ambiente")
-
+    token = get_pluggy_access_token()
     return {
-        "X-API-KEY": PLUGGY_API_KEY,
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
 
@@ -197,7 +221,6 @@ def get_snapshot(user_id: str, item_id: str):
         # saldo total das contas (campo 'balance' se existir)
         saldo_total = 0.0
         for acc in accounts:
-            # Pluggy costuma usar 'balance' em 'balance' ou 'balance.current'
             balance = acc.get("balance") or {}
             if isinstance(balance, dict):
                 valor = balance.get("current") or balance.get("available") or 0
@@ -231,7 +254,6 @@ def get_snapshot(user_id: str, item_id: str):
                 "qtd_contas": len(accounts),
                 "qtd_transacoes": len(transactions),
             },
-            # se quiser, pode esconder o raw depois. por enquanto deixo exposto pra debug
             "raw": {
                 "accounts": accounts,
                 "transactions": transactions,
